@@ -1,0 +1,240 @@
+#pragma once
+
+#include "../JuceHeader.h"
+#if __APPLE__
+#include "CoreMLVocoderBackend.h"
+#endif
+#include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <fstream>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#ifdef HAVE_ONNXRUNTIME
+#include <onnxruntime_cxx_api.h>
+#ifdef USE_DIRECTML
+#include <dml_provider_factory.h>
+#endif
+#endif
+
+/**
+ * PC-NSF-HiFiGAN Vocoder wrapper using Core ML on macOS and ONNX Runtime elsewhere.
+ * Converts mel spectrogram + F0 to waveform with pitch control.
+ */
+class Vocoder
+{
+public:
+  Vocoder();
+  ~Vocoder();
+
+  // Stop accepting work and let active inference exit at its next chunk.
+  void requestShutdown();
+
+  /**
+   * Load vocoder model from ONNX file.
+   * @param modelPath Path to .onnx model file
+   * @return true if successful
+   */
+  bool loadModel(const juce::File &modelPath);
+
+  /**
+   * Check if model is loaded.
+   */
+  bool isLoaded() const { return loaded; }
+
+  /**
+   * Check if ONNX Runtime is available.
+   */
+  static bool isOnnxRuntimeAvailable();
+
+  /**
+   * Synthesize waveform from mel spectrogram and F0.
+   * @param mel Mel spectrogram [T, NUM_MELS] (T frames, each with NUM_MELS
+   * values)
+   * @param f0 F0 values [T] (fundamental frequency per frame)
+   * @return Synthesized waveform, or empty vector on failure
+   */
+  std::vector<float> infer(const std::vector<std::vector<float>> &mel,
+                           const std::vector<float> &f0,
+                           const std::atomic<bool> *cancelFlag = nullptr);
+
+  /**
+   * Synthesize with pitch shift.
+   * @param mel Mel spectrogram
+   * @param f0 F0 values
+   * @param pitchShiftSemitones Pitch shift in semitones (+12 = one octave up)
+   * @return Synthesized waveform
+   */
+  std::vector<float>
+  inferWithPitchShift(const std::vector<std::vector<float>> &mel,
+                      const std::vector<float> &f0, float pitchShiftSemitones);
+
+  /**
+   * Asynchronous inference with callback.
+   * @param mel Mel spectrogram
+   * @param f0 F0 values
+   * @param callback Called with result on completion
+   */
+  void inferAsync(std::vector<std::vector<float>> mel,
+                  std::vector<float> f0,
+                  std::function<void(std::vector<float>)> callback,
+                  std::shared_ptr<std::atomic<bool>> cancelFlag = nullptr);
+
+  // Model parameters
+  int getSampleRate() const { return sampleRate; }
+  int getHopSize() const { return hopSize; }
+  int getNumMels() const { return numMels; }
+  bool isPitchControllable() const { return pitchControllable; }
+
+  // Device settings
+  void setExecutionDevice(const juce::String &device);
+  juce::String getExecutionDevice() const { return executionDevice; }
+  void setExecutionDeviceId(int deviceId);
+  int getExecutionDeviceId() const { return executionDeviceId; }
+
+  // Reload model with new settings (call after changing device)
+  bool reloadModel();
+
+  /**
+   * True once a render failed past the vocoder's own fallbacks (on macOS,
+   * after the Core ML CPU retry; on ONNX, on the first failure). Reading it
+   * clears it. The editor uses it to drop to the
+   * classic (PSOLA) engine instead of leaving the edit unrendered.
+   */
+  bool consumeUnrecoverableRenderFailure()
+  {
+    return unrecoverableRenderFailure.exchange(false);
+  }
+
+  /**
+   * True once the last load could not create the GPU session and loaded the
+   * model on CPU instead. Reading it clears it. A CPU vocoder render is far
+   * too slow to use, so the editor switches to classic (PSOLA) when it sees it.
+   */
+  bool consumeCpuFallbackOnLoad() { return cpuFallbackOnLoad.exchange(false); }
+
+private:
+  struct AsyncTask
+  {
+    std::vector<std::vector<float>> mel;
+    std::vector<float> f0;
+    std::function<void(std::vector<float>)> callback;
+    std::shared_ptr<std::atomic<bool>> cancelFlag;
+  };
+
+  bool loaded = false;
+  int sampleRate = 44100;
+  int hopSize = 512;
+  int numMels = 128;
+  bool pitchControllable = true;
+
+#ifdef USE_DIRECTML
+  juce::String executionDevice = "DirectML";
+#elif defined(USE_CUDA)
+  juce::String executionDevice = "CUDA";
+#else
+  juce::String executionDevice = "CPU";
+#endif
+
+  juce::File modelFile;
+#if __APPLE__
+  juce::File coreMLModelFile;
+  std::unique_ptr<CoreMLVocoderBackend> coreMLBackend;
+  bool usingCoreMLModel = false;
+  // First chunk size tried for Core ML; smaller on low-memory Macs.
+  size_t coreMLPreferredChunkFrames = 1024;
+#endif
+  std::unique_ptr<std::ofstream> logFile;
+  int executionDeviceId = 0;
+
+  // Set when infer() exhausted every fallback; see consumeUnrecoverableRenderFailure.
+  std::atomic<bool> unrecoverableRenderFailure{false};
+  // Set when loadModel() fell back from a GPU provider to CPU.
+  std::atomic<bool> cpuFallbackOnLoad{false};
+
+  // Thread safety for async operations
+  std::atomic<bool> isShuttingDown{false};
+  // Cancel flag of the render currently inside infer(), checked between
+  // chunks so a superseded long render stops early instead of running to
+  // completion. Only touched while inferenceMutex is held.
+  const std::atomic<bool> *activeCancelFlag = nullptr;
+  bool renderCancelled() const
+  {
+    return isShuttingDown.load() ||
+           (activeCancelFlag != nullptr && activeCancelFlag->load());
+  }
+  std::atomic<int> activeAsyncTasks{0};
+  std::mutex asyncMutex;
+  std::condition_variable asyncCondition;
+  std::thread asyncWorker;
+  std::deque<AsyncTask> asyncQueue;
+
+  // Mutex to protect ONNX session access during inference
+  mutable std::mutex inferenceMutex;
+
+  void log(const std::string &message);
+  // Always written, including Release builds, so field reports of a failing
+  // AI engine come with a reason. Use for errors and fallbacks only.
+  void logError(const std::string &message);
+  std::unique_ptr<std::ofstream> errorLogFile;
+  std::mutex errorLogMutex;
+
+#ifdef HAVE_ONNXRUNTIME
+  std::unique_ptr<Ort::Env> onnxEnv;
+  std::unique_ptr<Ort::Session> onnxSession;
+  std::unique_ptr<Ort::IoBinding> ioBinding;
+  std::unique_ptr<Ort::AllocatorWithDefaultOptions> allocator;
+
+  // Input/output names (cached)
+  std::vector<const char *> inputNames;
+  std::vector<const char *> outputNames;
+  std::vector<std::string> inputNameStrings;
+  std::vector<std::string> outputNameStrings;
+
+  // Reused per-inference buffers to avoid frequent heap allocations.
+  std::vector<float> melScratch;
+  std::vector<float> f0Scratch;
+  std::vector<int64_t> melShapeScratch;
+  std::vector<int64_t> f0ShapeScratch;
+  std::vector<Ort::Value> inputTensorScratch;
+  std::vector<Ort::Value> outputTensorScratch;
+
+  // Full ONNX render (chunking + crossfade) on the current session.
+  // Caller must hold inferenceMutex. Returns empty on failure.
+  std::vector<float> inferOnnxLocked(const std::vector<std::vector<float>> &mel,
+                                     const std::vector<float> &f0,
+                                     size_t numFrames);
+
+  // Single-chunk ONNX inference (caller must hold inferenceMutex).
+  // Returns empty vector on failure.
+  std::vector<float> inferChunkLocked(const std::vector<std::vector<float>> &mel,
+                                      const std::vector<float> &f0,
+                                      size_t numFrames);
+
+  // Create session options based on current settings
+  Ort::SessionOptions createSessionOptions();
+#endif
+
+#if __APPLE__
+  // Loads the Core ML bundle on firstUnits, falling back to CPUOnly if that
+  // fails. Caller must hold inferenceMutex (or be in loadModel).
+  bool loadCoreMLWithFallback(const juce::File &bundle,
+                              CoreMLVocoderBackend::ComputeUnits firstUnits);
+  // Runs one full Core ML render (chunking + crossfade) at the given chunk
+  // size. Returns empty on any chunk failure.
+  std::vector<float>
+  inferCoreMLAllChunksLocked(const std::vector<std::vector<float>> &mel,
+                             const std::vector<float> &f0, size_t numFrames,
+                             size_t maxChunkFrames);
+  std::vector<float>
+  inferCoreMLChunkLocked(const std::vector<std::vector<float>> &mel,
+                         const std::vector<float> &f0,
+                         size_t numFrames);
+#endif
+
+  juce::File resolvePreferredModelFile(const juce::File &requestedModelPath) const;
+};
