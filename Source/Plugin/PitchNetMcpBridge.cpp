@@ -47,7 +47,6 @@ void PitchNetMcpBridge::writeHeartbeat()
 {
     auto* obj = new juce::DynamicObject();
     obj->setProperty("instanceId", instanceId);
-    obj->setProperty("pid", static_cast<int>(juce::Process::getCurrentProcessId()));
     obj->setProperty("araActive", processor.isARAModeActive());
     obj->setProperty("sampleRate", processor.getHostSampleRate());
 
