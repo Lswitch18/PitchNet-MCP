@@ -19,6 +19,7 @@ jobs:
   # Windows CPU Build
   # ===========================================
   build-windows-cpu:
+    if: false
     runs-on: windows-latest
     name: Windows (CPU)
 

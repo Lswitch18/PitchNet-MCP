@@ -84,8 +84,8 @@ juce::var PitchNetMcpBridge::buildStateJson() const
     root->setProperty("pitchCenter", proj->getPitchCenter());
     root->setProperty("globalPitchOffset", proj->getGlobalPitchOffset());
     root->setProperty("formantShift", proj->getFormantShift());
-    root->setProperty("scaleRoot", proj->macroParameters.projectKeyRoot);
-    root->setProperty("scaleMode", static_cast<int>(proj->macroParameters.projectKeyMode));
+    root->setProperty("scaleRoot", proj->getProjectKeyRoot());
+    root->setProperty("scaleMode", static_cast<int>(proj->getProjectKeyMode()));
 
     juce::Array<juce::var> notesArr;
     const auto& notes = proj->getNotes();
@@ -134,11 +134,9 @@ void PitchNetMcpBridge::handleCommand(const juce::var& cmd)
     if (action == "set_scale")
     {
         Project updated(*proj);
-        if (cmd.hasProperty("root"))
-            updated.macroParameters.projectKeyRoot = static_cast<int>(cmd.getProperty("root", 0));
-        if (cmd.hasProperty("mode"))
-            updated.macroParameters.projectKeyMode = static_cast<ScaleMode>(static_cast<int>(cmd.getProperty("mode", 1)));
-        updated.macroParameters.projectKeyInitialized = true;
+        int rootVal = cmd.hasProperty("root") ? static_cast<int>(cmd.getProperty("root", 0)) : updated.getProjectKeyRoot();
+        ScaleMode modeVal = cmd.hasProperty("mode") ? static_cast<ScaleMode>(static_cast<int>(cmd.getProperty("mode", 1))) : updated.getProjectKeyMode();
+        updated.setProjectKey(rootVal, modeVal);
         processor.updateProjectStateFromEditor(updated);
 
         auto* resp = new juce::DynamicObject();
@@ -174,6 +172,7 @@ void PitchNetMcpBridge::handleCommand(const juce::var& cmd)
                     n.setFormantShift(static_cast<float>(item.getProperty("formantShift", n.getFormantShift())));
                 if (item.hasProperty("volumeDb"))
                     n.setVolumeDb(static_cast<float>(item.getProperty("volumeDb", n.getVolumeDb())));
+                updated.markNoteEditDirtyRange(n.getStartFrame(), n.getEndFrame());
                 ++applied;
             }
         }
