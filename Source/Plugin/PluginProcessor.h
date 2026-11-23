@@ -107,6 +107,7 @@ public:
   void requestPluginProjectRender(const Project &project,
                                   PitchNetAudioModification* target = nullptr);
   void updateProjectStateFromEditor(const Project &project);
+  void applyMcpProjectEdit(const Project &project, bool triggerRender);
   void requestCapturedAudioAnalysis(const juce::AudioBuffer<float> &buffer,
                                     double sampleRate,
                                     double timelineOffsetSeconds,

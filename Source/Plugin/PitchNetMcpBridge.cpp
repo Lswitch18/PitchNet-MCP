@@ -136,7 +136,7 @@ void PitchNetMcpBridge::handleCommand(const juce::var& cmd)
         int rootVal = cmd.hasProperty("root") ? static_cast<int>(cmd.getProperty("root", 0)) : updated.getProjectKeyRoot();
         ScaleMode modeVal = cmd.hasProperty("mode") ? static_cast<ScaleMode>(static_cast<int>(cmd.getProperty("mode", 1))) : updated.getProjectKeyMode();
         updated.setProjectKey(rootVal, modeVal);
-        processor.updateProjectStateFromEditor(updated);
+        processor.applyMcpProjectEdit(updated, false);
 
         auto* resp = new juce::DynamicObject();
         resp->setProperty("ok", true);
@@ -176,8 +176,7 @@ void PitchNetMcpBridge::handleCommand(const juce::var& cmd)
             }
         }
 
-        processor.updateProjectStateFromEditor(updated);
-        processor.requestPluginProjectRender(updated);
+        processor.applyMcpProjectEdit(updated, true);
         writeHeartbeat();
 
         auto* resp = new juce::DynamicObject();

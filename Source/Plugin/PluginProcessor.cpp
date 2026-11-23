@@ -1776,6 +1776,11 @@ void PitchNetAudioProcessor::requestPluginProjectRender(
               if (auto *view =
                       dynamic_cast<IMainView *>(renderSafeMain.getComponent())) {
                 if (success) {
+                  if (!renderActiveAraRegion && araAnalysisProjectSnapshot && mainComponent) {
+                    if (auto *uiProject = mainComponent->getProject()) {
+                      *uiProject = *araAnalysisProjectSnapshot;
+                    }
+                  }
                   // updateHostAudioTimelineOffset() REPADS the project's
                   // buffers to relocate content. ARA projects are stored in
                   // modification time and must never be padded: passing the
@@ -1799,6 +1804,20 @@ void PitchNetAudioProcessor::requestPluginProjectRender(
             });
       },
       pendingRerun, true);
+}
+
+void PitchNetAudioProcessor::applyMcpProjectEdit(const Project &project,
+                                                 bool triggerRender) {
+  if (mainComponent != nullptr) {
+    if (auto *uiProject = mainComponent->getProject()) {
+      *uiProject = project;
+      if (auto *component = mainComponent->getComponent())
+        component->repaint();
+    }
+  }
+  updateProjectStateFromEditor(project);
+  if (triggerRender)
+    requestPluginProjectRender(project);
 }
 
 void PitchNetAudioProcessor::updateProjectStateFromEditor(
